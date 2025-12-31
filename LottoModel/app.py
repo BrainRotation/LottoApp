@@ -80,18 +80,10 @@ def predict():
         # 모델 예측 실행
         recommended_numbers = model_instance.predict(recent_data_cache)
         
-        # 학습 데이터 회차 정보 가져오기
-        try:
-            df = pd.read_csv(DATA_PATH)
-            total_rounds = len(df)  # 전체 회차 수
-        except:
-            total_rounds = 1205  # 기본값
-        
-        # JSON 형태로 응답
+        # JSON 형태로 응답 (회차는 Flutter 앱에서 자체 계산)
         return jsonify({
             "status": "success",
             "numbers": recommended_numbers,
-            "total_rounds": total_rounds,  # 학습된 총 회차 추가
             "message": "AI 추천 번호 생성 완료"
         })
         

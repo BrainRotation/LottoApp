@@ -83,21 +83,42 @@ class LottoDeepLearning:
         print(f"Device set to: {self.device}")
         self.model = LottoLSTM().to(self.device)
         
-    def train(self, epochs=300, batch_size=64, lr=0.001):
+    def train(self, epochs=1000, batch_size=64, lr=0.001, patience=50):
         print(f"학습 시작 (Device: {self.device})")
+        print(f"설정: Epochs={epochs}, Batch Size={batch_size}, Learning Rate={lr}")
+        print(f"Early Stopping: {patience}번 연속 개선 없으면 조기 종료\n")
         
         dataset = LottoDataset(self.data_path, self.window_size)
-        # num_workers=0 으로 설정하여 멀티프로세싱 이슈 방지
-        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=0)
+        
+        # 학습/검증 데이터 분리 (80:20)
+        train_size = int(0.8 * len(dataset))
+        val_size = len(dataset) - train_size
+        train_dataset, val_dataset = torch.utils.data.random_split(
+            dataset, [train_size, val_size]
+        )
+        
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
+        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
         
         criterion = nn.BCEWithLogitsLoss()
         optimizer = optim.Adam(self.model.parameters(), lr=lr)
         
-        self.model.train()
+        # Early Stopping 변수
+        best_val_loss = float('inf')
+        patience_counter = 0
+        best_model_state = None
+        
+        print(f"학습 데이터: {train_size}개, 검증 데이터: {val_size}개\n")
+        print("="*80)
         
         for epoch in range(epochs):
-            total_loss = 0
-            for batch_x, batch_y in dataloader:
+            # === 학습 단계 ===
+            self.model.train()
+            train_loss = 0
+            train_correct = 0
+            train_total = 0
+            
+            for batch_x, batch_y in train_loader:
                 batch_x = batch_x.to(self.device)
                 batch_y = batch_y.to(self.device)
                 
@@ -108,12 +129,92 @@ class LottoDeepLearning:
                 loss.backward()
                 optimizer.step()
                 
-                total_loss += loss.item()
-            
-            if (epoch+1) % 50 == 0:
-                print(f"Epoch [{epoch+1}/{epochs}], Loss: {total_loss/len(dataloader):.5f}")
+                train_loss += loss.item()
                 
-        print("학습 완료.")
+                # 정확도 계산 (상위 6개 예측 중 실제 번호와 일치하는 개수)
+                probs = torch.sigmoid(outputs)
+                pred_indices = torch.topk(probs, k=6, dim=1).indices
+                
+                for i in range(len(batch_y)):
+                    true_nums = torch.where(batch_y[i] > 0.5)[0]
+                    pred_nums = pred_indices[i]
+                    matches = len(set(true_nums.tolist()) & set(pred_nums.tolist()))
+                    train_correct += matches
+                    train_total += 6
+            
+            avg_train_loss = train_loss / len(train_loader)
+            train_accuracy = (train_correct / train_total) * 100
+            
+            # === 검증 단계 ===
+            self.model.eval()
+            val_loss = 0
+            val_correct = 0
+            val_total = 0
+            
+            with torch.no_grad():
+                for batch_x, batch_y in val_loader:
+                    batch_x = batch_x.to(self.device)
+                    batch_y = batch_y.to(self.device)
+                    
+                    outputs = self.model(batch_x)
+                    loss = criterion(outputs, batch_y)
+                    val_loss += loss.item()
+                    
+                    # 검증 정확도 계산
+                    probs = torch.sigmoid(outputs)
+                    pred_indices = torch.topk(probs, k=6, dim=1).indices
+                    
+                    for i in range(len(batch_y)):
+                        true_nums = torch.where(batch_y[i] > 0.5)[0]
+                        pred_nums = pred_indices[i]
+                        matches = len(set(true_nums.tolist()) & set(pred_nums.tolist()))
+                        val_correct += matches
+                        val_total += 6
+            
+            avg_val_loss = val_loss / len(val_loader)
+            val_accuracy = (val_correct / val_total) * 100
+            
+            # 진행 상황 출력 (10 에포크마다)
+            if (epoch + 1) % 10 == 0 or epoch == 0:
+                print(f"Epoch [{epoch+1:4d}/{epochs}] "
+                      f"Train Loss: {avg_train_loss:.5f} (정확도: {train_accuracy:.2f}%) | "
+                      f"Val Loss: {avg_val_loss:.5f} (정확도: {val_accuracy:.2f}%)")
+            
+            # Early Stopping 체크
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                patience_counter = 0
+                best_model_state = self.model.state_dict().copy()
+                
+                if (epoch + 1) % 10 == 0:
+                    print(f"  ✅ 검증 손실 개선! (Best: {best_val_loss:.5f})")
+            else:
+                patience_counter += 1
+                
+                if patience_counter >= patience:
+                    print(f"\n{'='*80}")
+                    print(f"⚠️  Early Stopping 발동! ({patience}번 연속 개선 없음)")
+                    print(f"   최종 에포크: {epoch+1}/{epochs}")
+                    print(f"   최상 검증 손실: {best_val_loss:.5f}")
+                    print(f"{'='*80}\n")
+                    
+                    # 최상의 모델로 복원
+                    self.model.load_state_dict(best_model_state)
+                    break
+        
+        # 학습 종료
+        if patience_counter < patience:
+            print(f"\n{'='*80}")
+            print(f"✅ 학습 완료! (전체 {epochs} 에포크)")
+            print(f"   최종 검증 손실: {avg_val_loss:.5f}")
+            print(f"   최종 검증 정확도: {val_accuracy:.2f}%")
+            print(f"{'='*80}\n")
+            
+            # 최상의 모델로 복원
+            if best_model_state is not None:
+                self.model.load_state_dict(best_model_state)
+        
+        print("모델이 최상의 성능 상태로 설정되었습니다.")
 
     def save_model(self, path='lotto_lstm.pth'):
         torch.save(self.model.state_dict(), path)
@@ -177,7 +278,88 @@ class LottoDeepLearning:
         for k in sorted(counts.keys(), reverse=True):
             print(f"  {k}개 맞춤: {counts[k]}회")
 
+    def _validate_combination(self, nums, prev_round=None):
+        """
+        로또 번호 조합이 통계적 규칙에 맞는지 검증
+        점수가 높을수록 좋은 조합
+        """
+        score = 100  # 기본 점수
+        nums_sorted = sorted(nums)
+        
+        # 규칙 1: 십의 자리 분포 (0-1-1-1-0 패턴에 가까울수록 좋음)
+        tens_dist = [0] * 5
+        for num in nums:
+            tens_dist[num // 10] += 1
+        
+        # 이상적인 분포: [1, 1, 1, 1, 0~1] 정도
+        if tens_dist[0] <= 2 and tens_dist[1] <= 2 and tens_dist[2] <= 2 and tens_dist[3] <= 2 and tens_dist[4] <= 1:
+            score += 20
+        else:
+            score -= 10
+            
+        # 규칙 2: 끝자리 종류 (4-5개가 이상적)
+        last_digits = len(set([n % 10 for n in nums]))
+        if 4 <= last_digits <= 5:
+            score += 15
+        elif last_digits == 3 or last_digits == 6:
+            score += 5
+        
+        # 규칙 3: 구간별 분포 (1-15, 16-30, 31-45 각각 1-3개)
+        sections = [0, 0, 0]
+        for num in nums:
+            if 1 <= num <= 15:
+                sections[0] += 1
+            elif 16 <= num <= 30:
+                sections[1] += 1
+            else:
+                sections[2] += 1
+        
+        if all(1 <= s <= 3 for s in sections):
+            score += 15
+        
+        # 규칙 4: 연속번호 쌍 (0-1개가 일반적)
+        consecutive = 0
+        for i in range(len(nums_sorted)-1):
+            if nums_sorted[i+1] - nums_sorted[i] == 1:
+                consecutive += 1
+        
+        if consecutive <= 1:
+            score += 10
+        elif consecutive >= 3:
+            score -= 15
+        
+        # 규칙 5: 전회차 번호 재출현 (40-50% 확률로 1개)
+        if prev_round is not None:
+            prev_set = set(prev_round)
+            matches = len(prev_set & set(nums))
+            if matches == 1:
+                score += 20  # 1개 일치 (가장 흔한 패턴)
+            elif matches == 0:
+                score += 10  # 0개도 흔함
+            elif matches == 2:
+                score += 5   # 2개는 덜 흔함
+            else:
+                score -= 10  # 3개 이상은 드묾
+        
+        # 규칙 6: 동숙번호 쌍 회피 (12/21, 13/31, 14/41, 23/32, 24/42, 34/43)
+        pair_rules = [(12, 21), (13, 31), (14, 41), (23, 32), (24, 42), (34, 43)]
+        for p1, p2 in pair_rules:
+            if p1 in nums and p2 in nums:
+                score -= 20  # 동숙번호는 피하기
+                break
+        
+        # 규칙 7: 합계 범위 (너무 작거나 크지 않게)
+        total = sum(nums)
+        if 100 <= total <= 200:  # 평균적인 범위
+            score += 10
+        
+        return score
+
     def predict(self, recent_data):
+        """
+        LSTM 모델 + 통계 규칙 기반 예측 (다양성 강화)
+        매번 다른 조합을 생성하기 위해 랜덤성 추가
+        """
         self.model.eval()
         
         x_onehot = np.zeros((1, self.window_size, 45), dtype=np.float32)
@@ -193,18 +375,76 @@ class LottoDeepLearning:
         with torch.no_grad():
             output = self.model(input_tensor)
             probs = torch.sigmoid(output).cpu().numpy()[0]
+        
+        # 전회차 번호 가져오기
+        prev_round = recent_data[-1] if len(recent_data) > 0 else None
+        
+        # 다양성 추가: 확률에 약간의 랜덤 노이즈 추가
+        noise = np.random.normal(0, 0.05, probs.shape)  # 5% 노이즈
+        probs_with_noise = np.clip(probs + noise, 0, 1)
+        
+        # 상위 확률 번호들 선택 (매번 조금씩 다름)
+        top_count = np.random.randint(18, 25)  # 18~24개 사이에서 랜덤
+        top_numbers = np.argsort(probs_with_noise)[-top_count:][::-1] + 1
+        
+        candidates_with_scores = []
+        
+        # 더 많은 조합 생성 및 평가 (100개)
+        for _ in range(100):
+            # 상위 번호들의 확률 기반 샘플링
+            top_probs = probs_with_noise[top_numbers - 1]
+            top_probs_norm = top_probs / top_probs.sum()
             
-        probs_sum = probs.sum()
-        normalized_probs = probs / probs_sum
+            candidate = np.random.choice(
+                top_numbers,
+                size=6,
+                replace=False,
+                p=top_probs_norm
+            )
+            
+            # 규칙 기반 점수 계산
+            score = self._validate_combination(candidate, prev_round)
+            
+            # 점수가 일정 수준 이상이면 후보에 추가
+            if score >= 80:  # 80점 이상만 허용
+                candidates_with_scores.append((score, candidate))
         
-        recommended_numbers = np.random.choice(
-            range(1, 46),
-            size=6,
-            replace=False,
-            p=normalized_probs
-        )
+        # 후보가 없으면 점수 낮춰서 재시도
+        if not candidates_with_scores:
+            for _ in range(50):
+                top_probs = probs_with_noise[top_numbers - 1]
+                top_probs_norm = top_probs / top_probs.sum()
+                
+                candidate = np.random.choice(
+                    top_numbers,
+                    size=6,
+                    replace=False,
+                    p=top_probs_norm
+                )
+                
+                score = self._validate_combination(candidate, prev_round)
+                if score >= 60:  # 60점 이상
+                    candidates_with_scores.append((score, candidate))
         
-        return sorted(recommended_numbers.tolist())
+        # 상위 점수 조합 중에서 랜덤하게 선택 (다양성!)
+        if candidates_with_scores:
+            # 점수 순으로 정렬
+            candidates_with_scores.sort(reverse=True, key=lambda x: x[0])
+            
+            # 상위 30% 중에서 랜덤 선택
+            top_30_percent = max(1, len(candidates_with_scores) // 3)
+            selected_idx = np.random.randint(0, min(top_30_percent, len(candidates_with_scores)))
+            
+            _, selected_combination = candidates_with_scores[selected_idx]
+            return sorted(selected_combination.tolist())
+        else:
+            # 최악의 경우: 순수 확률 기반 선택
+            return sorted(np.random.choice(
+                range(1, 46),
+                size=6,
+                replace=False,
+                p=probs_with_noise / probs_with_noise.sum()
+            ).tolist())
 
 # 하위 호환성을 위한 클래스 별칭 (LottoPredictor 호출 시 LottoDeepLearning 사용)
 LottoPredictor = LottoDeepLearning

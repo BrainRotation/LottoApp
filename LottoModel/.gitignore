@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# 가상환경
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 모델 파일 (용량이 크므로 선택적으로 제외)
+# lotto_lstm.pth
+
+# 데이터 파일 (필요시 제외)
+# data/*.csv
+# data/*.xlsx
+
+# ngrok (30MB, 별도 다운로드)
+ngrok.exe
+ngrok
+
+# 임시 파일
+*.log
+.DS_Store
+Thumbs.db
+

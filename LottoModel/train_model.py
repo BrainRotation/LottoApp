@@ -10,8 +10,8 @@ def train():
     # window_size=20: 과거 20회차 데이터를 보고 다음 회차 예측
     dl_model = LottoPredictor(data_path='data/lotto-1052.csv', window_size=20)
     
-    # 2. 모델 학습
-    dl_model.train(epochs=300, batch_size=64, lr=0.001)
+    # 2. 모델 학습 (500 에포크, Early Stopping 없이 전체 진행)
+    dl_model.train(epochs=500, batch_size=64, lr=0.001, patience=9999)
     
     # 3. 모델 저장
     dl_model.save_model('lotto_lstm.pth')
